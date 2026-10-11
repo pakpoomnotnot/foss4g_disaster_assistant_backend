@@ -288,7 +288,7 @@ const STYLE_URL = {
 
 ## 8. Environment Variables
 
-ดู [`backend/.env.example`](.env.example) — สรุปที่ต้องมี:
+สร้างไฟล์ `.env` ในโฟลเดอร์นี้ (ไม่ commit) — ตัวแปรที่ต้องมี:
 
 | ตัวแปร | ตัวอย่าง | หมายเหตุ |
 |---|---|---|
@@ -312,7 +312,7 @@ const STYLE_URL = {
 backend/
 ├── Cargo.toml
 ├── .env               (gitignored — token จริง)
-├── .env.example        (commit ได้ — placeholder)
+├── .env                (local only — gitignored)
 ├── README.md           (ไฟล์นี้)
 └── src/
     ├── main.rs          (setup axum router, load gazetteer ตอน startup)
