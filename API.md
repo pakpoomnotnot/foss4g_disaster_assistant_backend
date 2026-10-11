@@ -1,47 +1,55 @@
-# askme-disaster Backend — API Reference (สำหรับทีม Frontend)
+# askme-disaster Backend — API Reference
 
-> เอกสารนี้คือ contract ที่ implement จริงแล้ว (ไม่ใช่ spec) — ตรงกับโค้ดใน `src/handlers/` ทุกจุด
-> ถ้าพฤติกรรมจริงกับเอกสารนี้ไม่ตรงกัน ให้ถือว่าเป็นบั๊ก แจ้งทีม backend ได้เลย
-> ดู [README.md](README.md) ถ้าอยากรู้ว่าข้างในทำงานยังไง (LLM prompt, gazetteer, GISTDA auth ฯลฯ) — ไฟล์นี้พูดแค่ contract ที่ frontend ต้องคุยด้วย
+This is the contract between the backend and the frontend. It describes what the code in `src/handlers/` does today. If the backend behaves differently from this document, treat that as a bug.
+
+For how the backend works inside (LLM prompts, gazetteer, GISTDA auth), see [README.md](README.md).
 
 ---
 
 ## 1. Base URL
 
-Dev: `http://localhost:8080` (พอร์ตตั้งได้ผ่าน `PORT` env var ฝั่ง backend)
+Development: `http://localhost:8080`. The port is set by the backend's `PORT` variable.
 
-**CORS:** เปิดแบบ permissive (`Access-Control-Allow-Origin: *`) สำหรับตอนนี้ — เรียกจาก origin ไหนก็ได้ตอน dev ไม่ต้องตั้งค่าอะไรฝั่ง frontend เพิ่ม (จะถูก lock ลงก่อน production)
+**CORS:** fully permissive (`Access-Control-Allow-Origin: *`) for development, so the frontend needs no extra setup. Restrict it before production.
 
-**Content-Type:** ทุก request/response เป็น `application/json`
+**Content-Type:** every request and response is `application/json`.
 
 ---
 
 ## 2. `POST /api/query`
 
-รับคำถามภาษาธรรมชาติ (ไทย/อังกฤษ) แล้วคืน GeoJSON + สรุปข้อความ
+Takes a natural-language question in Thai or English and returns GeoJSON, statistics and a summary.
 
 ### Request
 
 ```json
-{ "text": "flooding in Ayutthaya this week" }
+{ "text": "flooding in Ayutthaya this week", "area_idn": null }
 ```
 
-| field | type | required |
-|---|---|---|
-| `text` | string | ใช่ |
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `text` | string | yes | The user's question |
+| `area_idn` | number \| null | no | Set this when the user picks a candidate from a clarification response (2.1). The backend then uses that area directly instead of resolving the place name again. |
 
-### Response — เป็นไปได้ 3 รูปแบบหลัก ทุกอันคืน HTTP 200 (ยกเว้น error case ในหัวข้อ 2.4)
+### Responses
 
-ก่อนอ่านโค้ด frontend ให้เช็ค field `needs_clarification` ก่อนเสมอ — ถ้า `true` แปลว่า **ไม่มี** `geojson`/`bbox` ในตอบกลับ ต้องเอา `message`/`candidates` ไปแสดงถาม user ต่อ ไม่ใช่พยายาม render แผนที่
+There are three successful shapes, all returned with HTTP 200. Errors are described in 2.4.
 
-#### 2.1 ต้องการความชัดเจนเพิ่ม (`needs_clarification: true`)
+**Always check `needs_clarification` first.** If it is `true`, the response has no `geojson` or `bbox`. Show `message` and `candidates` to the user instead of rendering the map.
 
-เกิดได้จาก 3 สาเหตุ: (a) LLM เองแยก hazard/location ไม่ออกจากประโยค, (b) ชื่อสถานที่หาไม่เจอในฐานข้อมูล, (c) ชื่อสถานที่ตรงกับมากกว่า 1 แห่ง (เช่น "Chiang Mai" ตรงทั้งจังหวัดเชียงใหม่ และตำบลหนึ่งในร้อยเอ็ดที่บังเอิญสะกดเหมือนกัน)
+#### 2.1 Clarification needed (`needs_clarification: true`)
+
+This happens when:
+
+- (a) the LLM could not find a hazard or a location in the sentence
+- (b) the place name is not in the gazetteer
+- (c) the place name matches more than one area
 
 ```json
 {
   "needs_clarification": true,
-  "message": "พบชื่อ \"Bang Phli\" หลายแห่ง กรุณาระบุให้ชัดเจนขึ้น",
+  "message": "Found several places named \"Bang Phli\". Please be more specific.",
+  "missing": null,
   "candidates": [
     {
       "area_idn": 1103,
@@ -61,23 +69,27 @@ Dev: `http://localhost:8080` (พอร์ตตั้งได้ผ่าน `
 }
 ```
 
-(ตัวอย่างจริงจากข้อมูล — "Bang Phli" ตรงกับทั้งอำเภอในสมุทรปราการ และตำบลในอยุธยาที่บังเอิญสะกดเหมือนกัน)
+This is real data. "Bang Phli" is both a district in Samut Prakan and a tambon in Ayutthaya. `message` is written in the language of the question.
 
-`candidates` เป็น `[]` (array ว่าง) ในกรณี (a) และ (b) — มีแต่กรณี (c) เท่านั้นที่มี candidate list ให้เลือก จำกัดไว้สูงสุด 10 รายการ
+| Field | Type | Notes |
+|---|---|---|
+| `message` | string | Text to show the user |
+| `missing` | `"location"` \| `"hazard"` \| `null` | Which part of the question was missing. `"location"` means everything else was understood, so the user's next message can be treated as the place and combined with the original question. |
+| `candidates` | Candidate[] | Only filled in case (c), with at most 10 entries. Empty (`[]`) in cases (a) and (b). |
 
 **Candidate object:**
 
-| field | type | หมายเหตุ |
+| Field | Type | Notes |
 |---|---|---|
-| `area_idn` | number | รหัสพื้นที่ ใช้ถ้าจะทำ UI แบบเลือกจาก dropdown แล้วส่ง query ใหม่ที่ระบุชัดขึ้น |
+| `area_idn` | number | Send it back as `area_idn` in the next request when the user picks this candidate |
 | `level` | `"province"` \| `"amphoe"` \| `"tambon"` | |
 | `name_th` | string | |
 | `name_en` | string | |
-| `province` | string \| null | ชื่อจังหวัด (name_en) ที่ candidate นั้นสังกัด — `null` ถ้า candidate เป็น province เอง หรือหา parent ไม่เจอ |
+| `province` | string \| null | English name of the province the candidate belongs to. `null` when the candidate is itself a province. |
 
-**แนะนำ UX:** ให้ user คลิกเลือก candidate แล้วส่ง query ใหม่ที่ระบุชื่อจังหวัด/อำเภอชัดเจนขึ้น (เช่น ต่อ `name_en` + `province` เป็นข้อความใหม่) — backend ไม่มี endpoint สำหรับส่ง `area_idn` ตรงๆ ใน v1 นี้
+**Suggested UX:** show the candidates as clickable chips. When the user clicks one, resend the original `text` with that `area_idn`.
 
-#### 2.2 พบข้อมูล (`needs_clarification: false`, มี features)
+#### 2.2 Data found (`needs_clarification: false`, with features)
 
 ```json
 {
@@ -88,64 +100,96 @@ Dev: `http://localhost:8080` (พอร์ตตั้งได้ผ่าน `
     "area_idn": 14,
     "level": "province",
     "name_th": "พระนครศรีอยุธยา",
-    "name_en": "Phra Nakhon Si Ayutthaya"
+    "name_en": "Phra Nakhon Si Ayutthaya",
+    "parent_area_idn": null
   },
   "time_window_days": 7,
-  "summary": "พบ 3 พื้นที่น้ำท่วมในพระนครศรีอยุธยา ช่วง 7 วันที่ผ่านมา",
-  "geojson": { "type": "FeatureCollection", "features": [ /* ดูหัวข้อ 4 */ ] },
-  "bbox": [100.212706, 14.111092, 100.82323, 14.673195]
+  "time_range": { "from": "2026-10-04", "to": "2026-10-11", "label": "the last 7 days" },
+  "dataset": null,
+  "summary": "Found 3 flooded areas in Phra Nakhon Si Ayutthaya during the last 7 days",
+  "geojson": { "type": "FeatureCollection", "features": [] },
+  "bbox": [100.212706, 14.111092, 100.82323, 14.673195],
+  "filtered_out": 0,
+  "truncated": false,
+  "stats": { "...": "see below" },
+  "analysis": "Flooding over the last 7 days is concentrated in ...",
+  "lang": "en"
 }
 ```
 
-#### 2.3 ไม่พบข้อมูลในเงื่อนไขนี้ (`needs_clarification: false`, features ว่าง — **ไม่ใช่ error**)
+(`features` is shortened here. The structure of each feature is in section 4.)
 
-รูปแบบเดียวกับ 2.2 ทุกอย่าง ต่างแค่:
+#### 2.3 No data for this query (`needs_clarification: false`, no features)
+
+This is **not an error**. The shape is the same as 2.2, except:
 
 ```json
 {
-  "...": "... (fields อื่นเหมือน 2.2) ...",
-  "summary": "ไม่พบข้อมูลน้ำท่วมในพระนครศรีอยุธยา ช่วง 7 วันที่ผ่านมา",
+  "summary": "No flood data found in Phra Nakhon Si Ayutthaya during the last 7 days",
   "geojson": { "type": "FeatureCollection", "features": [] },
-  "bbox": null
+  "bbox": null,
+  "analysis": null
 }
 ```
 
-Frontend ควรแสดงข้อความ `summary` เฉยๆ (ไม่ zoom แผนที่ เพราะ `bbox` เป็น `null`) — ห้าม treat เป็น error state
+`stats.total` is `0`. When the STAC search itself matched nothing, `filtered_out` and `truncated` are omitted, so treat them as optional. Show the `summary` and do not zoom the map, because `bbox` is `null`.
 
-**Response fields ทั้งหมดของ 2.2/2.3:**
+#### Result fields (2.2 and 2.3)
 
-| field | type | หมายเหตุ |
+| Field | Type | Notes |
 |---|---|---|
 | `needs_clarification` | `false` | |
 | `hazard` | `"flood"` \| `"fire"` \| `"drought"` | |
-| `location_text` | string | ข้อความสถานที่ตามที่ LLM ดึงมา (ไม่ normalize) |
-| `resolved_area` | object | `{ area_idn, level, name_th, name_en }` — เหมือน candidate แต่ไม่มี `province` field |
-| `time_window_days` | `1` \| `3` \| `7` \| `30` | |
-| `summary` | string | ข้อความสรุปภาษาไทย เอาไปแสดงตรงๆ ได้ |
-| `geojson` | `FeatureCollection` | ดูหัวข้อ 4 — โครงสร้าง properties **ต่างกันตาม hazard มาก** |
-| `bbox` | `[minLon, minLat, maxLon, maxLat]` \| `null` | คำนวณจาก geometry จริงของ features ที่ได้ (ไม่ใช่ bbox ของพื้นที่ที่ query) — ใช้กับ `map.fitBounds()` ได้ตรงๆ, `null` เมื่อไม่มี feature |
+| `location_text` | string | Place text as extracted by the LLM, not normalised |
+| `resolved_area` | object | `{ area_idn, level, name_th, name_en, parent_area_idn }` |
+| `time_window_days` | number | 1 to 365. If the user named explicit dates, use `time_range` instead. |
+| `time_range` | `{ from, to, label }` | The period that was actually searched (`YYYY-MM-DD`). `label` is a readable description. It can differ from the question when the dates the LLM extracted were invalid and the backend fell back to a relative window. |
+| `dataset` | `"dri_plus"` \| `"smap"` \| `"ndwi"` \| `null` | Drought product that was searched. It is always set for drought (a plain "ภัยแล้ง" ("drought") means DRI+) and `null` for flood and fire. |
+| `summary` | string | One-sentence summary, ready to display |
+| `geojson` | FeatureCollection | See section 4. The properties **differ a lot between hazards**. |
+| `bbox` | `[minLon, minLat, maxLon, maxLat]` \| `null` | Computed from the returned feature geometries, not from the queried area. Pass it straight to `map.fitBounds()`. `null` when there are no features. |
+| `filtered_out` | number | Features dropped because they were outside the requested area or date range |
+| `truncated` | boolean | `true` when some upstream items could not be fetched, or the 3,000-item STAC cap was reached, so the result is known to be incomplete |
+| `stats` | Stats | Statistics computed by the backend (see below) |
+| `analysis` | string \| null | Short written analysis of `stats` by the LLM. `null` when the LLM was unreachable. The statistics are still valid, so a missing analysis never blocks the result. |
+| `lang` | `"th"` \| `"en"` | Language of every string the backend wrote. Match the UI labels to it. |
 
-#### 2.4 Error responses (ไม่ใช่ 200)
+**Stats object:**
+
+| Field | Type | Notes |
+|---|---|---|
+| `total` | number | Number of features |
+| `sub_level` | AdminLevel \| null | The level below the queried area (province to amphoe to tambon). `null` when a tambon was queried. |
+| `sub_level_label` | string \| null | Readable name of that level |
+| `breakdown` | Bucket[] | Counts per sub-area. The top 8 are listed and the rest are grouped into one `other` bucket. |
+| `sub_areas_affected` | number | Number of sub-areas with at least one feature |
+| `categories` | `{ title, buckets: Bucket[] }[]` | Hazard-specific groupings, for example land use for fire, severity class for drought and flooded farmland for flood |
+| `timeline` | Bucket[] | Counts per date, in chronological order. Only filled for hazards whose features carry a date. |
+| `metrics` | `{ label, value }[]` | Extra figures as display-ready strings |
+
+**Bucket:** `{ name: string, count: number, share: number, other: boolean }`. `share` is a percentage of the total with one decimal. `other: true` marks the grouped remainder row, which is not a real place. Leave it out when scaling bar charts.
+
+#### 2.4 Error responses (non-200)
 
 ```json
 { "error": "GISTDA credential missing or expired — set GISTDA_API_KEY in .env" }
 ```
 
-| HTTP status | เมื่อไหร่เกิด | `error` message |
+| HTTP status | When | `error` message |
 |---|---|---|
-| 503 | LLM ไม่ตอบ/timeout/คืน non-2xx | `"LLM unavailable or timed out"` |
-| 500 | LLM ตอบ JSON ผิด schema (แม้ retry 1 ครั้งแล้ว) | `"failed to parse LLM response"` |
-| 503 | GISTDA credential ใช้ไม่ได้ (ไม่ได้ตั้งค่า หรือ — เฉพาะกรณี fallback ไปใช้ token — หมดอายุแล้ว) | `"GISTDA credential missing or expired — set GISTDA_API_KEY in .env"` |
-| 502 | GISTDA STAC search หรือ Vallaris asset fetch ล้มเหลว/timeout | `"upstream GISTDA/Vallaris error"` |
-| 500 | error ภายในอื่นๆ ที่ไม่คาดคิด | `"internal server error"` |
+| 503 | LLM unreachable, timed out, rate-limited or returned non-2xx | `"LLM unavailable or timed out"` |
+| 500 | LLM returned JSON that does not match the schema, even after one retry | `"failed to parse LLM response"` |
+| 503 | GISTDA credential not set, or (token fallback only) expired | `"GISTDA credential missing or expired — set GISTDA_API_KEY in .env"` |
+| 502 | GISTDA STAC search or Vallaris fetch failed or timed out | `"upstream GISTDA/Vallaris error"` |
+| 500 | Any other unexpected internal error | `"internal server error"` |
 
-**แนะนำ frontend:** แสดง toast/banner ทั่วไปว่า "ระบบขัดข้อง ลองใหม่อีกครั้ง" สำหรับทุก error case ข้างบน — message ที่ backend คืนมาตั้งใจเขียนให้ dev อ่าน ไม่ใช่ user-facing copy (โดยเฉพาะ 503 credential เป็นปัญหาฝั่ง backend config ล้วนๆ ผู้ใช้แก้เองไม่ได้)
+**Suggested frontend handling:** show one generic "Something went wrong, please try again" message for all of these. The `error` text is written for developers, not end users. The credential 503 in particular is a backend configuration problem that users cannot fix.
 
 ---
 
 ## 3. `GET /api/health`
 
-Health check เฉยๆ ไม่ต้องส่ง body
+Health check with no request body.
 
 ```json
 {
@@ -155,35 +199,39 @@ Health check เฉยๆ ไม่ต้องส่ง body
   "gistda_token_valid": true,
   "gistda_auth": "api_key",
   "llm_reachable": true,
-  "llm_model": "tekton-code"
+  "llm_model": "google/gemma-4-26b-a4b-it:free"
 }
 ```
 
-- HTTP 200 ถ้า `status: "ok"` (ทุก field เป็น `true`/มีค่า), HTTP 503 ถ้า `status: "degraded"` (field ใด field หนึ่งเป็น `false`)
-- ไม่ต้อง poll ถี่ๆ ฝั่ง frontend — เอาไว้เช็คตอน boot หรือแสดง system status banner ก็พอ
+- HTTP 200 with `status: "ok"` when every check passes.
+- HTTP 503 with `status: "degraded"` when any check fails.
+- `llm_reachable` only checks that the LLM's `/models` endpoint answers. A model that is temporarily rate-limited can still report `true`.
+- There is no need to poll it often. Call it at startup, or use it for a status banner.
 
 ---
 
-## 4. โครงสร้าง `geojson.features` — **ต่างกันตาม `hazard` มาก อ่านก่อน render**
+## 4. `geojson.features` structure: **differs by `hazard`, read before rendering**
 
-Backend ไม่ normalize properties ของแต่ละ feature เลย ส่งต่อจาก GISTDA/Vallaris ตรงๆ (เว้นแต่คำนวณ `bbox` ที่ response level ให้แล้ว) ดังนั้น shape ของ `properties` ในแต่ละ feature ขึ้นกับ `hazard` ที่ query:
+The backend passes feature properties through from GISTDA/Vallaris without normalising them. It only computes the response-level `bbox` and `stats`. The shape of `properties` therefore depends on the `hazard`.
 
-### `hazard: "flood"` — polygon พื้นที่น้ำท่วม
+### `hazard: "flood"`: flooded-area polygons
 
 ```json
 {
   "type": "Feature",
-  "geometry": { "type": "Polygon", "coordinates": [ /* ... */ ] },
-  "properties": { /* เดิมทีมัก near-empty ในข้อมูลตัวอย่างที่ทดสอบ — อย่า assume field ตายตัว */ }
+  "geometry": { "type": "Polygon", "coordinates": [] },
+  "properties": {}
 }
 ```
 
-### `hazard: "fire"` — point จุดความร้อนดาวเทียม (VIIRS/MODIS)
+Properties vary between flood products and were often almost empty in the samples we tested. Do not assume any fixed fields.
+
+### `hazard: "fire"`: satellite hotspot points (VIIRS/MODIS)
 
 ```json
 {
   "type": "Feature",
-  "geometry": { "type": "Point", "coordinates": [122.7704, -8.5391] },
+  "geometry": { "type": "Point", "coordinates": [100.5, 14.3] },
   "properties": {
     "acq_date": "2025-01-31",
     "acq_time": "1734",
@@ -191,25 +239,26 @@ Backend ไม่ normalize properties ของแต่ละ feature เล�
     "satellite": "N",
     "confidence": "nominal",
     "frp": 2.95,
-    "changwat": null,
-    "amphoe": null,
-    "tambol": null,
-    "ct_en": "Indonesia",
-    "ct_tn": "อินโดนีเซีย"
+    "changwat": "...",
+    "amphoe": "...",
+    "tambol": "...",
+    "ct_en": "Thailand",
+    "ct_tn": "ประเทศไทย"
   }
 }
 ```
 
-จุดสำคัญสำหรับ frontend:
-- `confidence` (`"low"` \| `"nominal"` \| `"high"`) และ `frp` (Fire Radiative Power, ตัวเลข) มีประโยชน์สำหรับ styling ตาม severity
-- `changwat`/`amphoe`/`tambol` เป็นชื่อเขตปกครองไทย (reverse-geocoded มาให้แล้วจาก provider) — เป็น `null` ถ้าจุดอยู่นอกประเทศไทย ห้าม assume ว่ามีค่าเสมอ
+Notes for the frontend:
 
-### `hazard: "drought"` — polygon ระดับตำบลทั่วประเทศ
+- `confidence` (`"low"` \| `"nominal"` \| `"high"`) and `frp` (Fire Radiative Power) are useful for styling by severity.
+- `changwat`, `amphoe` and `tambol` are Thai admin names, reverse-geocoded by the provider. They are `null` for points outside Thailand, so never assume they are set.
+
+### `hazard: "drought"`: tambon-level polygons
 
 ```json
 {
   "type": "Feature",
-  "geometry": { "type": "MultiPolygon", "coordinates": [ /* ... */ ] },
+  "geometry": { "type": "MultiPolygon", "coordinates": [] },
   "properties": {
     "pv_en": "Bangkok", "pv_tn": "กรุงเทพมหานคร", "pv_idn": "10",
     "ap_en": "BANG KHEN", "ap_tn": "บางเขน", "ap_idn": "1005",
@@ -221,38 +270,42 @@ Backend ไม่ normalize properties ของแต่ละ feature เล�
 }
 ```
 
-จุดสำคัญสำหรับ frontend:
-- มีชื่อจังหวัด/อำเภอ/ตำบลติดมาในทุก polygon แล้ว (`pv_en`/`ap_en`/`tb_en`) ใช้ทำ tooltip/popup ได้ตรงๆ
-- `dri_mean` (ค่าดัชนี drought risk) มักเป็น `null` ในข้อมูลที่ทดสอบได้ — ถ้าจะทำ choropleth ตาม severity ต้อง handle `null` case ไว้ด้วย
+Notes for the frontend:
 
-**สรุป:** ก่อน render popup/tooltip ให้ switch ตาม `hazard` field ที่ response level เสมอ อย่าพยายามอ่าน property ชื่อเดียวกันข้าม hazard เพราะ schema เป็นคนละชุดกันจริงๆ
+- Every polygon carries province, district and tambon names (`pv_*`, `ap_*`, `tb_*`), which are ready for tooltips and popups.
+- The value fields depend on `dataset` (DRI+, SMAP or NDWI) and can be `null`. Handle `null` when building a choropleth.
+
+**In short:** always switch on the response-level `hazard` (and `dataset` for drought) before reading feature properties. The schemas really are different.
 
 ---
 
-## 5. Enum values อ้างอิง
+## 5. Enum reference
 
 ```ts
 type Hazard = "flood" | "fire" | "drought";
-type TimeWindowDays = 1 | 3 | 7 | 30;
+type DroughtProduct = "dri_plus" | "smap" | "ndwi";
 type AdminLevel = "province" | "amphoe" | "tambon";
+type Lang = "th" | "en";
 ```
 
 ---
 
-## 6. ตัวอย่าง curl (ทดสอบแล้วจริงกับ backend นี้)
+## 6. curl examples
 
 ```bash
 curl -s -X POST http://localhost:8080/api/query \
   -H "Content-Type: application/json" \
   -d '{"text": "is Korat in drought?"}'
+```
 
+```bash
 curl -s http://localhost:8080/api/health
 ```
 
 ---
 
-## 7. สิ่งที่ยังไม่มีใน v1 (เผื่อวางแผน UI ล่วงหน้า)
+## 7. Not in v1
 
-- ไม่มี endpoint สำหรับ autocomplete/ค้นหาสถานที่แยก (`GET /api/gazetteer/search` เป็น optional ใน backend README §6 ยังไม่ implement)
-- ไม่มี pagination ใน `/api/query` — backend จำกัด result ไว้ที่ระดับ 50 items/collection เองแล้ว (ป้องกัน fire/drought volume สูงเกินไป) frontend ไม่ต้องส่ง limit/offset มา
-- ไม่มี auth/API key ฝั่ง backend นี้เอง (คนละชั้นกับ GISTDA token ที่ backend ถือไว้เอง) — ถ้าจะ deploy public ต้องคุยเรื่องนี้เพิ่ม
+- No separate place search or autocomplete endpoint.
+- No pagination on `/api/query`. The backend pages through GISTDA itself, with caps of 3,000 STAC items (which sets `truncated`) and 20,000 features per item. The frontend never sends `limit` or `offset`.
+- No authentication on this API itself. This is separate from the GISTDA key the backend holds. Add authentication before any public deployment.
